@@ -1,0 +1,7 @@
+snapchat-data/
+snapchat-data.zip
+snapchat-processed/
+.venv
+.venv-snapchat/
+__pycache__/
+*.py[cod]
