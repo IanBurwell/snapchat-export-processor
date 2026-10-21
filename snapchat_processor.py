@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Snapchat Export Processor (`process_snapchat_export.py`)
+Snapchat Export Processor (`snapchat_processor.py`)
 
 Non-destructive CLI tool that mirrors media assets (images and videos) from a Snapchat
 data export into a separate output directory, applies strictly evidence-backed date/time
@@ -31,8 +31,6 @@ import urllib.parse
 
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps
-
-from review_overlays_gui import launch_overlay_review_gui
 
 
 SUPPORTED_IMAGE_EXTENSIONS: set[str] = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"}
@@ -480,9 +478,19 @@ def validate_paths(
         raise ValueError("Refusing output path: output directory cannot be inside the source tree.")
     if src_resolved.is_relative_to(out_resolved):
         raise ValueError("Refusing output path: source directory cannot be inside the output directory.")
+
+    if out_resolved.is_dir():
+        source_markers = ("index.html", "html", "json", "memories.html", "chat_history.json", "memories_history.json")
+        found = [m for m in source_markers if (out_resolved / m).exists()]
+        if found:
+            raise ValueError(
+                f"Refusing output path: destination '{output_dir}' appears to be a source directory "
+                f"(contains: {', '.join(found)}). Output must be a separate destination."
+            )
+
     if out_resolved.exists() and not overwrite:
         raise FileExistsError(
-            f"Refusing to overwrite existing output path '{output_dir}'. Pass --overwrite to allow."
+            f"Refusing to overwrite existing output path '{output_dir}'."
         )
 
     return src_resolved, out_resolved
@@ -1092,8 +1100,8 @@ def save_debug_output(
 
 
 def process_export(
-    source_dir: pathlib.Path,
-    output_dir: pathlib.Path,
+    source_dir: pathlib.Path = pathlib.Path("snapchat-data"),
+    output_dir: pathlib.Path = pathlib.Path("snapchat-processed"),
     dry_run: bool = False,
     overwrite: bool = False,
     exiftool_bin: str = "exiftool",
@@ -1101,8 +1109,6 @@ def process_export(
     temp_staging: str = "auto",
     verbose: bool = False,
     show_progress: bool = True,
-    gui: bool = False,
-    review_chat_media: bool = False,
     debug: bool = False,
     debug_dir: pathlib.Path | None = None,
     **kwargs: Any,
@@ -1689,27 +1695,6 @@ def process_export(
             logger=logger,
         )
 
-    gui_review_data: dict[str, Any] | None = None
-    if gui or review_chat_media:
-        if dry_run:
-            logger.info("Skipping GUI review in dry-run mode.")
-        else:
-            gui_mode = "both" if (gui and review_chat_media) else ("chat_media" if review_chat_media else "overlays")
-            logger.info("Launching review GUI (mode=%s)...", gui_mode)
-            gui_review_data = launch_overlay_review_gui(
-                output_root=out_root,
-                composites=composites_created if (gui or gui_mode in ("both", "overlays")) else [],
-                mode=gui_mode,
-                logger=logger,
-            )
-            if gui_review_data:
-                logger.info(
-                    "Review completed: kept %d overlay pairs, %d chat media, deleted %d files",
-                    gui_review_data.get("kept_both", 0) + gui_review_data.get("kept_with_overlay", 0) + gui_review_data.get("kept_without_overlay", 0),
-                    gui_review_data.get("chat_media_kept", 0),
-                    len(gui_review_data.get("deleted_files", [])),
-                )
-
     report: dict[str, Any] = {
         "dry_run": dry_run,
         "timings": timings,
@@ -1746,9 +1731,6 @@ def process_export(
     if debug_output_data is not None:
         report["debug"] = debug_output_data
         report["summary"]["debug_dir"] = str((debug_dir or (out_root / "debug")).resolve())
-    if gui_review_data is not None:
-        report["overlay_review"] = gui_review_data
-        report["summary"]["overlay_review"] = gui_review_data
 
     logger.info(
         "Processed export (dry_run=%s): source_files=%d, mirrored=%d, omitted_overlays=%d, "
@@ -1772,20 +1754,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Safe, non-destructive Snapchat export processor for Memories and Chat Media."
     )
     parser.add_argument(
-        "--source", "-s", required=True, type=pathlib.Path,
-        help="Path to the Snapchat export source directory.",
+        "--source", "-s", default=pathlib.Path("snapchat-data"), type=pathlib.Path,
+        help="Path to the Snapchat export source directory (default: snapchat-data).",
     )
     parser.add_argument(
-        "--output", "-o", required=True, type=pathlib.Path,
-        help="Path to the output directory (must be outside source tree and not already exist unless --overwrite).",
+        "--output", "-o", default=pathlib.Path("snapchat-processed"), type=pathlib.Path,
+        help="Path to the output directory (default: snapchat-processed).",
     )
     parser.add_argument(
         "--dry-run", "-n", action="store_true",
         help="Analyze export and validate all rules without creating or modifying output files.",
-    )
-    parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Allow writing to an existing output directory.",
     )
     parser.add_argument(
         "--exiftool-bin", default="exiftool",
@@ -1808,20 +1786,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable interactive progress bar and execution time breakdown output.",
     )
     parser.add_argument(
-        "--gui", "--review-overlays", action="store_true",
-        help="Launch an interactive GUI at the end of processing to review image pairs with and without overlays, allowing selection of which to keep.",
-    )
-    parser.add_argument(
-        "--review-chat-media", action="store_true",
-        help="Launch review GUI to filter and delete non-useful chat media (memes, screenshots, etc.).",
-    )
-    parser.add_argument(
         "--debug", action="store_true",
-        help="Save diagnostic information, problematic files (unsupported, conflicts, ambiguous), logs, and metadata notes to a debug output folder.",
-    )
-    parser.add_argument(
-        "--debug-dir", type=pathlib.Path, default=None,
-        help="Custom path for debug output directory (default: <output>/debug when --debug is set).",
+        help="Save diagnostic information, problematic files (unsupported, conflicts, ambiguous), logs, and metadata notes to <output>/debug.",
     )
     return parser
 
@@ -1829,21 +1795,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    out_path = args.output
+    overwrite = False
+    if out_path.exists():
+        try:
+            reply = input(f"Output directory '{out_path}' already exists. Overwrite? [y/N]: ").strip().lower()
+            if reply not in ("y", "yes"):
+                print("Aborted. Output directory was not modified.", file=sys.stderr)
+                return 1
+            overwrite = True
+        except (EOFError, KeyboardInterrupt, OSError):
+            print("\nAborted.", file=sys.stderr)
+            return 1
+
     try:
         process_export(
             source_dir=args.source,
             output_dir=args.output,
             dry_run=args.dry_run,
-            overwrite=args.overwrite,
+            overwrite=overwrite,
             exiftool_bin=args.exiftool_bin,
             align_memories_sequence=not args.no_align_memories_sequence,
             temp_staging=args.temp_staging,
             verbose=args.verbose,
             show_progress=not args.no_progress,
-            gui=args.gui,
-            review_chat_media=args.review_chat_media,
             debug=args.debug,
-            debug_dir=args.debug_dir,
         )
         return 0
     except Exception as exc:

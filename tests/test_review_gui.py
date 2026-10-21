@@ -9,8 +9,12 @@ import urllib.parse
 import unittest
 from PIL import Image
 
-import process_snapchat_export as pse
-import review_overlays_gui as rog
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+import snapchat_processor as pse
+import review_gui as rog
 
 
 class TestGuiAndDebug(unittest.TestCase):
@@ -287,20 +291,23 @@ class TestGuiAndDebug(unittest.TestCase):
 
     def test_cli_argument_parsing(self) -> None:
         parser = pse.build_arg_parser()
-        args1 = parser.parse_args(["-s", "src", "-o", "dst", "--gui", "--debug", "--review-chat-media"])
-        self.assertTrue(args1.gui)
+        args1 = parser.parse_args(["-s", "src", "-o", "dst", "--debug"])
+        self.assertEqual(args1.source, pathlib.Path("src"))
+        self.assertEqual(args1.output, pathlib.Path("dst"))
         self.assertTrue(args1.debug)
-        self.assertTrue(args1.review_chat_media)
-        self.assertIsNone(args1.debug_dir)
 
-        args2 = parser.parse_args(["-s", "src", "-o", "dst", "--review-overlays", "--debug-dir", "custom/debug"])
-        self.assertTrue(args2.gui)
-        self.assertEqual(str(args2.debug_dir), "custom/debug")
+        args_default = parser.parse_args([])
+        self.assertEqual(args_default.source, pathlib.Path("snapchat-data"))
+        self.assertEqual(args_default.output, pathlib.Path("snapchat-processed"))
+        self.assertFalse(args_default.debug)
 
         rog_parser = rog.build_arg_parser()
         rog_args = rog_parser.parse_args(["target_dir", "--mode", "chat_media", "-p", "8080"])
         self.assertEqual(rog_args.mode, "chat_media")
         self.assertEqual(rog_args.port, 8080)
+
+        rog_args_default = rog_parser.parse_args([])
+        self.assertEqual(rog_args_default.output_dir, pathlib.Path("snapchat-processed"))
 
     def test_classify_chat_media_type(self) -> None:
         self.assertEqual(rog.classify_chat_media_type("chat/video.mp4", "video.mp4", True), "videos")
@@ -533,6 +540,217 @@ class TestGuiAndDebug(unittest.TestCase):
             show_progress=False,
         )
         self.assertNotIn("overlay_review", dry_report)
+
+    def test_unified_discover_all_review_items(self) -> None:
+        mem_dir = self.out_dir / "memories"
+        chat_dir = self.out_dir / "chat_media"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        chat_dir.mkdir(parents=True, exist_ok=True)
+
+        m1 = mem_dir / "2023-01-01_11111111-1111-1111-1111-111111111111-main.jpg"
+        c1 = mem_dir / "2023-01-01_11111111-1111-1111-1111-111111111111-composite.jpg"
+        m_standalone = mem_dir / "2023-01-02_22222222-2222-2222-2222-222222222222-main.jpg"
+        self._create_sample_image(m1)
+        self._create_sample_image(c1)
+        self._create_sample_image(m_standalone)
+
+        ch_photo = chat_dir / "photo.jpg"
+        ch_thumb = chat_dir / "pic-thumbnail.png"
+        self._create_sample_image(ch_photo)
+        self._create_sample_image(ch_thumb)
+
+        items = rog.discover_all_review_items(self.out_dir)
+        self.assertEqual(len(items), 4)
+
+        pair_items = [it for it in items if it["item_type"] == "pair"]
+        self.assertEqual(len(pair_items), 1)
+        self.assertEqual(pair_items[0]["main_rel_path"], "memories/2023-01-01_11111111-1111-1111-1111-111111111111-main.jpg")
+        self.assertEqual(pair_items[0]["composite_rel_path"], "memories/2023-01-01_11111111-1111-1111-1111-111111111111-composite.jpg")
+        self.assertEqual(pair_items[0]["source"], "memories")
+
+        mem_standalone_items = [it for it in items if it["item_type"] == "single" and it["source"] == "memories"]
+        self.assertEqual(len(mem_standalone_items), 1)
+        self.assertEqual(mem_standalone_items[0]["filename"], m_standalone.name)
+
+        chat_items = [it for it in items if it["source"] == "chat_media"]
+        self.assertEqual(len(chat_items), 2)
+        media_types = {it["media_type"] for it in chat_items}
+        self.assertIn("photos", media_types)
+        self.assertIn("thumbnails", media_types)
+
+    def test_unified_review_manager_overlay_pair_deletions(self) -> None:
+        mem_dir = self.out_dir / "memories"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pair 1: Keep Both (neither deleted)
+        m1 = mem_dir / "p1-main.jpg"
+        c1 = mem_dir / "p1-composite.jpg"
+        self._create_sample_image(m1)
+        self._create_sample_image(c1)
+
+        # Pair 2: Keep Without Overlay (composite deleted)
+        m2 = mem_dir / "p2-main.jpg"
+        c2 = mem_dir / "p2-composite.jpg"
+        self._create_sample_image(m2)
+        self._create_sample_image(c2)
+
+        # Pair 3: Keep With Overlay (main deleted)
+        m3 = mem_dir / "p3-main.jpg"
+        c3 = mem_dir / "p3-composite.jpg"
+        self._create_sample_image(m3)
+        self._create_sample_image(c3)
+
+        # Pair 4: Delete Both
+        m4 = mem_dir / "p4-main.jpg"
+        c4 = mem_dir / "p4-composite.jpg"
+        self._create_sample_image(m4)
+        self._create_sample_image(c4)
+
+        raw_items = [
+            {"item_type": "pair", "source": "memories", "media_type": "pairs", "rel_path": "memories/p1-main.jpg", "main_rel_path": "memories/p1-main.jpg", "composite_rel_path": "memories/p1-composite.jpg"},
+            {"item_type": "pair", "source": "memories", "media_type": "pairs", "rel_path": "memories/p2-main.jpg", "main_rel_path": "memories/p2-main.jpg", "composite_rel_path": "memories/p2-composite.jpg"},
+            {"item_type": "pair", "source": "memories", "media_type": "pairs", "rel_path": "memories/p3-main.jpg", "main_rel_path": "memories/p3-main.jpg", "composite_rel_path": "memories/p3-composite.jpg"},
+            {"item_type": "pair", "source": "memories", "media_type": "pairs", "rel_path": "memories/p4-main.jpg", "main_rel_path": "memories/p4-main.jpg", "composite_rel_path": "memories/p4-composite.jpg"},
+        ]
+        mgr = rog.UnifiedReviewManager(self.out_dir, raw_items)
+        mgr.set_choice(0, "both")
+        mgr.set_choice(1, "without_overlay")
+        mgr.set_choice(2, "with_overlay")
+        mgr.set_choice(3, "delete_both")
+
+        res = mgr.apply_deletions()
+        self.assertEqual(res["pairs_total"], 4)
+        self.assertEqual(res["pairs_kept_both"], 1)
+        self.assertEqual(res["pairs_kept_without_overlay"], 1)
+        self.assertEqual(res["pairs_kept_with_overlay"], 1)
+        self.assertEqual(res["pairs_deleted_both"], 1)
+
+        # Pair 1: both exist
+        self.assertTrue(m1.is_file())
+        self.assertTrue(c1.is_file())
+
+        # Pair 2: main kept, composite deleted
+        self.assertTrue(m2.is_file())
+        self.assertFalse(c2.exists())
+
+        # Pair 3: main deleted, composite kept
+        self.assertFalse(m3.exists())
+        self.assertTrue(c3.is_file())
+
+        # Pair 4: both deleted
+        self.assertFalse(m4.exists())
+        self.assertFalse(c4.exists())
+
+    def test_unified_review_manager_bulk_selection_and_deletion(self) -> None:
+        chat_dir = self.out_dir / "chat_media"
+        chat_dir.mkdir(parents=True, exist_ok=True)
+        t1 = chat_dir / "t1-thumb.jpg"
+        t2 = chat_dir / "t2-thumb.jpg"
+        p1 = chat_dir / "p1.jpg"
+        p2 = chat_dir / "p2.jpg"
+        self._create_sample_image(t1)
+        self._create_sample_image(t2)
+        self._create_sample_image(p1)
+        self._create_sample_image(p2)
+
+        items = [
+            {"item_type": "single", "source": "chat_media", "media_type": "thumbnails", "rel_path": "chat_media/t1-thumb.jpg"},
+            {"item_type": "single", "source": "chat_media", "media_type": "thumbnails", "rel_path": "chat_media/t2-thumb.jpg"},
+            {"item_type": "single", "source": "chat_media", "media_type": "photos", "rel_path": "chat_media/p1.jpg"},
+            {"item_type": "single", "source": "chat_media", "media_type": "photos", "rel_path": "chat_media/p2.jpg"},
+        ]
+        mgr = rog.UnifiedReviewManager(self.out_dir, items)
+
+        # Test bulk setting
+        mgr.set_choices_bulk([0, 1], "delete")
+        self.assertEqual(mgr.items[0].choice, "delete")
+        self.assertEqual(mgr.items[1].choice, "delete")
+        self.assertEqual(mgr.items[2].choice, "keep")
+
+        # Test group deletion
+        del_res = mgr.delete_group("thumbnails", source="chat_media")
+        self.assertEqual(del_res["deleted"], 2)
+        self.assertFalse(t1.exists())
+        self.assertFalse(t2.exists())
+        self.assertTrue(p1.is_file())
+        self.assertTrue(p2.is_file())
+
+    def test_unified_gui_web_flow(self) -> None:
+        mem_dir = self.out_dir / "memories"
+        chat_dir = self.out_dir / "chat_media"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        chat_dir.mkdir(parents=True, exist_ok=True)
+
+        m1 = mem_dir / "2023-01-01_11111111-1111-1111-1111-111111111111-main.jpg"
+        c1 = mem_dir / "2023-01-01_11111111-1111-1111-1111-111111111111-composite.jpg"
+        ch1 = chat_dir / "chat1.jpg"
+        self._create_sample_image(m1)
+        self._create_sample_image(c1)
+        self._create_sample_image(ch1)
+
+        result_holder: list[dict[str, Any]] = []
+
+        def _run_server() -> None:
+            res = rog.launch_review_gui(
+                self.out_dir,
+                port=18948,
+                open_browser=False,
+            )
+            result_holder.append(res)
+
+        server_thread = threading.Thread(target=_run_server, daemon=True)
+        server_thread.start()
+
+        import time
+        time.sleep(0.5)
+
+        base_url = "http://127.0.0.1:18948"
+
+        with urllib.request.urlopen(f"{base_url}/api/items") as resp:
+            self.assertEqual(resp.status, 200)
+            items = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(len(items), 2)  # 1 pair + 1 chat item
+
+        pair_idx = next(it["index"] for it in items if it["item_type"] == "pair")
+        single_idx = next(it["index"] for it in items if it["item_type"] == "single")
+
+        # Set pair choice to with_overlay (delete main)
+        set_req = urllib.request.Request(
+            f"{base_url}/api/set_choice",
+            data=json.dumps({"index": pair_idx, "choice": "with_overlay"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(set_req) as resp:
+            self.assertEqual(resp.status, 200)
+
+        # Bulk set chat item to keep
+        bulk_req = urllib.request.Request(
+            f"{base_url}/api/set_bulk",
+            data=json.dumps({"indices": [single_idx], "choice": "keep"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(bulk_req) as resp:
+            self.assertEqual(resp.status, 200)
+
+        # Apply deletions
+        apply_req = urllib.request.Request(
+            f"{base_url}/api/apply",
+            data=json.dumps({"choices": {str(pair_idx): "with_overlay", str(single_idx): "keep"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(apply_req) as resp:
+            self.assertEqual(resp.status, 200)
+            data = json.loads(resp.read().decode("utf-8"))
+            self.assertTrue(data.get("ok"))
+
+        server_thread.join(timeout=3)
+        self.assertEqual(len(result_holder), 1)
+        self.assertFalse(m1.exists(), "Pair main should be deleted")
+        self.assertTrue(c1.exists(), "Pair composite should be retained")
+        self.assertTrue(ch1.exists(), "Chat item should be kept")
 
 
 if __name__ == "__main__":

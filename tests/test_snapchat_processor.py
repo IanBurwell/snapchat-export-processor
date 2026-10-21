@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit and integration tests for `process_snapchat_export.py`.
+Unit and integration tests for `snapchat_processor.py`.
 Covers output safety guards, dry-run non-destructiveness, Memories HTML/JSON parsing,
 evidence-backed metadata resolution, conflict & ambiguity policies, date-only time
 preservation, Pillow overlay compositing, ExifTool image/video read-back, Markdown
@@ -32,7 +32,8 @@ for cand_dir in (THIS_DIR, WORKSPACE_ROOT, OUTPUT_ARTIFACTS_DIR):
     if cand_dir.is_dir() and str(cand_dir) not in sys.path:
         sys.path.insert(0, str(cand_dir))
 
-import process_snapchat_export as pse
+from unittest.mock import patch
+import snapchat_processor as pse
 
 
 def _hash_tree(root: pathlib.Path) -> dict[str, tuple[str, int]]:
@@ -113,7 +114,7 @@ def _create_disposable_mp4(path: pathlib.Path, comment: str = "DisposableVideoCo
             stderr=subprocess.PIPE,
         )
     else:
-        sample_mp4 = THIS_DIR / "snapchat-data" / "memories" / "2018-07-16_901246df-41ca-8973-4578-630b3cd08c1a-main.mp4"
+        sample_mp4 = WORKSPACE_ROOT / "snapchat-data" / "memories" / "2018-07-16_901246df-41ca-8973-4578-630b3cd08c1a-main.mp4"
         if sample_mp4.is_file():
             shutil.copy2(sample_mp4, path)
             if shutil.which("exiftool"):
@@ -169,6 +170,20 @@ class TestSnapchatExportProcessor(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             pse.validate_paths(self.src_dir, existing_out, overwrite=False)
         self.assertEqual(pse.main(["--source", str(self.src_dir), "--output", str(existing_out)]), 1)
+
+        # Output directory with source markers should be rejected even with overwrite=True
+        source_like_out = self.root / "source_like_dir"
+        source_like_out.mkdir()
+        (source_like_out / "index.html").write_text("dummy", encoding="utf-8")
+        with self.assertRaises(ValueError) as ctx:
+            pse.validate_paths(self.src_dir, source_like_out, overwrite=True)
+        self.assertIn("appears to be a source directory", str(ctx.exception))
+
+        # Test CLI overwrite prompt logic
+        with patch("builtins.input", return_value="n"):
+            self.assertEqual(pse.main(["--source", str(self.src_dir), "--output", str(existing_out)]), 1)
+        with patch("builtins.input", return_value="y"):
+            self.assertEqual(pse.main(["--source", str(self.src_dir), "--output", str(existing_out), "--dry-run"]), 0)
 
         before_state = _hash_tree(self.src_dir)
         report = pse.process_export(self.src_dir, self.out_dir, dry_run=True)
@@ -392,6 +407,7 @@ class TestSnapchatExportProcessor(unittest.TestCase):
         unsupported_paths = [u["rel_path"] for u in report["unsupported"]]
         self.assertIn(f"memories/{avi6.name}", unsupported_paths)
 
+    @unittest.skip("Chat markdown export deprecated; only media is retained in output")
     def test_04_chat_markdown_escaping_chunking_links_and_privacy_logs(self) -> None:
         """
         Verifies chat_history.json export to Markdown:
