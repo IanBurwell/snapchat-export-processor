@@ -2,6 +2,9 @@
 
 A lightweight, non-destructive toolset to prepare Snapchat data exports for self-hosted photo managers (Immich, Google Photos, PhotoPrism, Apple Photos). Bakes Memories overlay graphics into composites, restores evidence-backed EXIF and QuickTime metadata, and provides a unified web-based GUI to review overlay pairs and purge unwanted chat media.
 
+
+![GUI](gui.png)
+
 ---
 
 ## 1. Environment Setup
